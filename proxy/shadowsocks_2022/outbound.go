@@ -29,10 +29,11 @@ func init() {
 }
 
 type Outbound struct {
-	ctx    context.Context
-	server net.Destination
-	method shadowsocks.Method
-	uot    bool
+	ctx        context.Context
+	server     net.Destination
+	method     shadowsocks.Method
+	uot        bool
+	uotVersion int
 }
 
 func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
@@ -56,6 +57,14 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
 		o.method = method
 	} else {
 		return nil, newError("unknown method ", config.Method)
+	}
+	switch config.UdpOverTcpVersion {
+	case uot.LegacyVersion:
+		o.uotVersion = uot.LegacyVersion
+	case 0, uot.Version:
+		o.uotVersion = 2
+	default:
+		return nil, newError("unknown udp over tcp protocol version ", config.UdpOverTcpVersion)
 	}
 	return o, nil
 }
@@ -150,8 +159,13 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		}
 
 		if o.uot {
-			serverConn := o.method.DialEarlyConn(connection, M.Socksaddr{Fqdn: uot.UOTMagicAddress})
-			return returnError(bufio.CopyPacketConn(ctx, packetConn, uot.NewClientConn(serverConn)))
+			var uConn *uot.Conn
+			if o.uotVersion == uot.Version {
+				uConn = uot.NewLazyConn(o.method.DialEarlyConn(connection, M.Socksaddr{Fqdn: uot.MagicAddress}), uot.Request{Destination: toSocksaddr(destination)})
+			} else {
+				uConn = uot.NewConn(o.method.DialEarlyConn(connection, M.Socksaddr{Fqdn: uot.LegacyMagicAddress}), false, toSocksaddr(destination))
+			}
+			return returnError(bufio.CopyPacketConn(ctx, packetConn, uConn))
 		} else {
 			serverConn := o.method.DialPacketConn(connection)
 			return returnError(bufio.CopyPacketConn(ctx, packetConn, serverConn))
