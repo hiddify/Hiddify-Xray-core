@@ -11,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/platform/filesystem"
 	"github.com/xtls/xray-core/common/protocol"
@@ -26,6 +25,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/tcp"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"github.com/xtls/xray-core/transport/internet/websocket"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -144,28 +144,10 @@ func (c *TCPConfig) Build() (proto.Message, error) {
 	return config, nil
 }
 
-type FragmentationConfig struct {
-	Enabled                    bool   `json:"enabled"`
-	FragmentionIntervalTimeout int64  `json:"fragmentationIntervalTimeout"`
-	Strategy                   string `json:"strategy"`
-	MaxChunkSize               int32  `json:"maxChunkSize"`
-	Sni                        string `json:"sni"`
-}
-
-func (c *FragmentationConfig) Build() (*websocket.Fragmentation, error) {
-	return &websocket.Fragmentation{
-		Enabled:                    c.Enabled,
-		FragmentionIntervalTimeout: c.FragmentionIntervalTimeout,
-		Strategy:                   c.Strategy,
-		MaxChunkSize:               c.MaxChunkSize,
-	}, nil
-}
-
 type WebSocketConfig struct {
-	Path                string               `json:"path"`
-	Headers             map[string]string    `json:"headers"`
-	AcceptProxyProtocol bool                 `json:"acceptProxyProtocol"`
-	Fragmentation       *FragmentationConfig `json:"fragmentation"`
+	Path                string            `json:"path"`
+	Headers             map[string]string `json:"headers"`
+	AcceptProxyProtocol bool              `json:"acceptProxyProtocol"`
 }
 
 // Build implements Buildable.
@@ -195,13 +177,6 @@ func (c *WebSocketConfig) Build() (proto.Message, error) {
 	}
 	if c.AcceptProxyProtocol {
 		config.AcceptProxyProtocol = c.AcceptProxyProtocol
-	}
-	if c.Fragmentation != nil {
-		fragmentation, err := c.Fragmentation.Build()
-		if err != nil {
-			return nil, newError("Failed to parse fragmentation.").Base(err).AtError()
-		}
-		config.Fragmentation = fragmentation
 	}
 	return config, nil
 }
@@ -647,6 +622,7 @@ type SocketConfig struct {
 	TCPUserTimeout       int32       `json:"tcpUserTimeout"`
 	V6only               bool        `json:"v6only"`
 	Interface            string      `json:"interface"`
+	TcpMptcp             bool        `json:"tcpMptcp"`
 }
 
 // Build implements Buildable.
@@ -678,12 +654,30 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 
 	dStrategy := internet.DomainStrategy_AS_IS
 	switch strings.ToLower(c.DomainStrategy) {
-	case "useip", "use_ip":
+	case "asis", "":
+		dStrategy = internet.DomainStrategy_AS_IS
+	case "useip":
 		dStrategy = internet.DomainStrategy_USE_IP
-	case "useip4", "useipv4", "use_ipv4", "use_ip_v4", "use_ip4":
+	case "useipv4":
 		dStrategy = internet.DomainStrategy_USE_IP4
-	case "useip6", "useipv6", "use_ipv6", "use_ip_v6", "use_ip6":
+	case "useipv6":
 		dStrategy = internet.DomainStrategy_USE_IP6
+	case "useipv4v6":
+		dStrategy = internet.DomainStrategy_USE_IP46
+	case "useipv6v4":
+		dStrategy = internet.DomainStrategy_USE_IP64
+	case "forceip":
+		dStrategy = internet.DomainStrategy_FORCE_IP
+	case "forceipv4":
+		dStrategy = internet.DomainStrategy_FORCE_IP4
+	case "forceipv6":
+		dStrategy = internet.DomainStrategy_FORCE_IP6
+	case "forceipv4v6":
+		dStrategy = internet.DomainStrategy_FORCE_IP46
+	case "forceipv6v4":
+		dStrategy = internet.DomainStrategy_FORCE_IP64
+	default:
+		return nil, newError("unsupported domain strategy: ", c.DomainStrategy)
 	}
 
 	return &internet.SocketConfig{
@@ -702,6 +696,7 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 		TcpUserTimeout:       c.TCPUserTimeout,
 		V6Only:               c.V6only,
 		Interface:            c.Interface,
+		TcpMptcp:             c.TcpMptcp,
 	}, nil
 }
 
