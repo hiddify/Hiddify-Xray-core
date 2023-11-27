@@ -2,7 +2,6 @@ package quic
 
 import (
 	"context"
-	"io"
 	"sync"
 	"time"
 
@@ -140,26 +139,36 @@ func (s *clientConnections) openConnection(ctx context.Context, destAddr net.Add
 	}
 
 	quicConfig := &quic.Config{
-		ConnectionIDLength:   12,
 		KeepAlivePeriod:      0,
 		HandshakeIdleTimeout: time.Second * 8,
 		MaxIdleTimeout:       time.Second * 300,
-		Tracer: qlog.NewTracer(func(_ logging.Perspective, connID []byte) io.WriteCloser {
-			return &QlogWriter{connID: connID}
-		}),
+		Tracer: func(ctx context.Context, p logging.Perspective, ci quic.ConnectionID) *logging.ConnectionTracer {
+			return qlog.NewConnectionTracer(&QlogWriter{connID: ci}, p, ci)
+		},
 	}
 
-	udpConn, _ := rawConn.(*net.UDPConn)
-	if udpConn == nil {
-		udpConn = rawConn.(*internet.PacketConnWrapper).Conn.(*net.UDPConn)
+	var udpConn *net.UDPConn
+	switch conn := rawConn.(type) {
+	case *net.UDPConn:
+		udpConn = conn
+	case *internet.PacketConnWrapper:
+		udpConn = conn.Conn.(*net.UDPConn)
+	default:
+		// TODO: Support sockopt for QUIC
+		rawConn.Close()
+		return nil, newError("QUIC with sockopt is unsupported").AtWarning()
 	}
+
 	sysConn, err := wrapSysConn(udpConn, config)
 	if err != nil {
 		rawConn.Close()
 		return nil, err
 	}
-
-	conn, err := quic.DialContext(context.Background(), sysConn, destAddr, "", tlsConfig.GetTLSConfig(tls.WithDestination(dest)), quicConfig)
+	tr := quic.Transport{
+		ConnectionIDLength: 12,
+		Conn:               sysConn,
+	}
+	conn, err := tr.Dial(context.Background(), destAddr, tlsConfig.GetTLSConfig(tls.WithDestination(dest)), quicConfig)
 	if err != nil {
 		sysConn.Close()
 		return nil, err

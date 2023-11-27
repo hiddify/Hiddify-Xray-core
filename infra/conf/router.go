@@ -6,18 +6,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/xtls/xray-core/app/router"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/platform/filesystem"
+	"google.golang.org/protobuf/proto"
 )
 
 type RouterRulesConfig struct {
 	RuleList       []json.RawMessage `json:"rules"`
 	DomainStrategy string            `json:"domainStrategy"`
 }
-
-// BalancingOptimalStrategyConfig stores BalancingOptimalStrategy config
 type BalancingOptimalStrategyConfig struct {
 	Timeout  uint32            `json:"timeout,omitempty"`
 	Interval uint32            `json:"interval,omitempty"`
@@ -263,6 +261,23 @@ func loadSite(file, code string) ([]*router.Domain, error) {
 	return SiteCache[index].Domain, nil
 }
 
+func DecodeVarint(buf []byte) (x uint64, n int) {
+	for shift := uint(0); shift < 64; shift += 7 {
+		if n >= len(buf) {
+			return 0, 0
+		}
+		b := uint64(buf[n])
+		n++
+		x |= (b & 0x7F) << shift
+		if (b & 0x80) == 0 {
+			return x, n
+		}
+	}
+
+	// The number is too large to represent in a 64-bit value.
+	return 0, 0
+}
+
 func find(data, code []byte) []byte {
 	codeL := len(code)
 	if codeL == 0 {
@@ -273,7 +288,7 @@ func find(data, code []byte) []byte {
 		if dataL < 2 {
 			return nil
 		}
-		x, y := proto.DecodeVarint(data[1:])
+		x, y := DecodeVarint(data[1:])
 		if x == 0 && y == 0 {
 			return nil
 		}
@@ -522,17 +537,17 @@ func ToCidrList(ips StringList) ([]*router.GeoIP, error) {
 func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 	type RawFieldRule struct {
 		RouterRule
-		Domain     *StringList  `json:"domain"`
-		Domains    *StringList  `json:"domains"`
-		IP         *StringList  `json:"ip"`
-		Port       *PortList    `json:"port"`
-		Network    *NetworkList `json:"network"`
-		SourceIP   *StringList  `json:"source"`
-		SourcePort *PortList    `json:"sourcePort"`
-		User       *StringList  `json:"user"`
-		InboundTag *StringList  `json:"inboundTag"`
-		Protocols  *StringList  `json:"protocol"`
-		Attributes string       `json:"attrs"`
+		Domain     *StringList       `json:"domain"`
+		Domains    *StringList       `json:"domains"`
+		IP         *StringList       `json:"ip"`
+		Port       *PortList         `json:"port"`
+		Network    *NetworkList      `json:"network"`
+		SourceIP   *StringList       `json:"source"`
+		SourcePort *PortList         `json:"sourcePort"`
+		User       *StringList       `json:"user"`
+		InboundTag *StringList       `json:"inboundTag"`
+		Protocols  *StringList       `json:"protocol"`
+		Attributes map[string]string `json:"attrs"`
 	}
 	rawFieldRule := new(RawFieldRule)
 	err := json.Unmarshal(msg, rawFieldRule)

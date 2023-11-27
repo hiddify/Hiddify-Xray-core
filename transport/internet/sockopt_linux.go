@@ -106,6 +106,7 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 				return newError("failed to set TCP_NODELAY", err)
 			}
 		}
+
 	}
 
 	if config.Tproxy.IsEnabled() {

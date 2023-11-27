@@ -5,15 +5,15 @@ package freedom
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
+	"io"
 	"math/big"
 	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/dice"
-	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/retry"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
@@ -22,10 +22,13 @@ import (
 	"github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
+
+var useSplice bool
 
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
@@ -37,6 +40,12 @@ func init() {
 		}
 		return h, nil
 	}))
+	const defaultFlagValue = "NOT_DEFINED_AT_ALL"
+	value := platform.NewEnvFlag(platform.UseFreedomSplice).GetValue(func() string { return defaultFlagValue })
+	switch value {
+	case defaultFlagValue, "auto", "enable":
+		useSplice = true
+	}
 }
 
 // Handler handles Freedom connections.
@@ -64,26 +73,18 @@ func (h *Handler) policy() policy.Session {
 }
 
 func (h *Handler) resolveIP(ctx context.Context, domain string, localAddr net.Address) net.Address {
-	var option dns.IPOption = dns.IPOption{
-		IPv4Enable: true,
-		IPv6Enable: true,
-		FakeEnable: false,
-	}
-	if h.config.DomainStrategy == Config_USE_IP4 || (localAddr != nil && localAddr.Family().IsIPv4()) {
-		option = dns.IPOption{
-			IPv4Enable: true,
-			IPv6Enable: false,
-			FakeEnable: false,
-		}
-	} else if h.config.DomainStrategy == Config_USE_IP6 || (localAddr != nil && localAddr.Family().IsIPv6()) {
-		option = dns.IPOption{
-			IPv4Enable: false,
-			IPv6Enable: true,
-			FakeEnable: false,
+	ips, err := h.dns.LookupIP(domain, dns.IPOption{
+		IPv4Enable: (localAddr == nil || localAddr.Family().IsIPv4()) && h.config.preferIP4(),
+		IPv6Enable: (localAddr == nil || localAddr.Family().IsIPv6()) && h.config.preferIP6(),
+	})
+	{ // Resolve fallback
+		if (len(ips) == 0 || err != nil) && h.config.hasFallback() && localAddr == nil {
+			ips, err = h.dns.LookupIP(domain, dns.IPOption{
+				IPv4Enable: h.config.fallbackIP4(),
+				IPv6Enable: h.config.fallbackIP6(),
+			})
 		}
 	}
-
-	ips, err := h.dns.LookupIP(domain, option)
 	if err != nil {
 		newError("failed to get IP address for domain ", domain).Base(err).WriteToLog(session.ExportIDToError(ctx))
 	}
@@ -108,6 +109,11 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	if outbound == nil || !outbound.Target.IsValid() {
 		return newError("target not specified.")
 	}
+	outbound.Name = "freedom"
+	inbound := session.InboundFromContext(ctx)
+	if inbound != nil {
+		inbound.SetCanSpliceCopy(1)
+	}
 	destination := outbound.Target
 	UDPOverride := net.UDPDestination(nil, 0)
 	if h.config.DestinationOverride != nil {
@@ -128,7 +134,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	var conn stat.Connection
 	err := retry.ExponentialBackoff(5, 100).On(func() error {
 		dialDest := destination
-		if h.config.useIP() && dialDest.Address.Family().IsDomain() {
+		if h.config.hasStrategy() && dialDest.Address.Family().IsDomain() {
 			ip := h.resolveIP(ctx, dialDest.Address.Domain(), dialer.Address())
 			if ip != nil {
 				dialDest = net.Destination{
@@ -137,6 +143,8 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 					Port:    dialDest.Port,
 				}
 				newError("dialing to ", dialDest).WriteToLog(session.ExportIDToError(ctx))
+			} else if h.config.forceIP() {
+				return dns.ErrEmptyResponse
 			}
 		}
 
@@ -173,15 +181,13 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 		var writer buf.Writer
 		if destination.Network == net.Network_TCP {
-
 			if h.config.Fragment != nil {
-				writer = buf.NewWriter(
-					&FragmentedClientHelloConn{
-						Conn:        conn,
-						maxLength:   int(h.config.Fragment.MaxLength),
-						minInterval: time.Duration(h.config.Fragment.MinInterval) * time.Millisecond,
-						maxInterval: time.Duration(h.config.Fragment.MaxInterval) * time.Millisecond,
-					})
+				newError("FRAGMENT", h.config.Fragment.PacketsFrom, h.config.Fragment.PacketsTo, h.config.Fragment.LengthMin, h.config.Fragment.LengthMax,
+					h.config.Fragment.IntervalMin, h.config.Fragment.IntervalMax).AtDebug().WriteToLog(session.ExportIDToError(ctx))
+				writer = buf.NewWriter(&FragmentWriter{
+					fragment: h.config.Fragment,
+					writer:   conn,
+				})
 			} else {
 				writer = buf.NewWriter(conn)
 			}
@@ -198,17 +204,17 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 	responseDone := func() error {
 		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
-
-		var reader buf.Reader
 		if destination.Network == net.Network_TCP {
-			reader = buf.NewReader(conn)
-		} else {
-			reader = NewPacketReader(conn, UDPOverride)
+			var writeConn net.Conn
+			if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Conn != nil && useSplice {
+				writeConn = inbound.Conn
+			}
+			return proxy.CopyRawConnIfExist(ctx, conn, writeConn, link.Writer, timer)
 		}
+		reader := NewPacketReader(conn, UDPOverride)
 		if err := buf.Copy(reader, output, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to process response").Base(err)
 		}
-
 		return nil
 	}
 
@@ -313,7 +319,7 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 			if w.UDPOverride.Port != 0 {
 				b.UDP.Port = w.UDPOverride.Port
 			}
-			if w.Handler.config.useIP() && b.UDP.Address.Family().IsDomain() {
+			if w.Handler.config.hasStrategy() && b.UDP.Address.Family().IsDomain() {
 				ip := w.Handler.resolveIP(w.Context, b.UDP.Address.Domain(), nil)
 				if ip != nil {
 					b.UDP.Address = ip
@@ -340,6 +346,70 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return nil
 }
 
+type FragmentWriter struct {
+	fragment *Fragment
+	writer   io.Writer
+	count    uint64
+}
+
+func (f *FragmentWriter) Write(b []byte) (int, error) {
+	f.count++
+
+	if f.fragment.PacketsFrom == 0 && f.fragment.PacketsTo == 1 {
+		if f.count != 1 || len(b) <= 5 || b[0] != 22 {
+			return f.writer.Write(b)
+		}
+		recordLen := 5 + ((int(b[3]) << 8) | int(b[4]))
+		data := b[5:recordLen]
+		buf := make([]byte, 1024)
+		for from := 0; ; {
+			to := from + int(randBetween(int64(f.fragment.LengthMin), int64(f.fragment.LengthMax)))
+			if to > len(data) {
+				to = len(data)
+			}
+			copy(buf[:3], b)
+			copy(buf[5:], data[from:to])
+			l := to - from
+			from = to
+			buf[3] = byte(l >> 8)
+			buf[4] = byte(l)
+			_, err := f.writer.Write(buf[:5+l])
+			time.Sleep(time.Duration(randBetween(int64(f.fragment.IntervalMin), int64(f.fragment.IntervalMax))) * time.Millisecond)
+			if err != nil {
+				return 0, err
+			}
+			if from == len(data) {
+				if len(b) > recordLen {
+					n, err := f.writer.Write(b[recordLen:])
+					if err != nil {
+						return recordLen + n, err
+					}
+				}
+				return len(b), nil
+			}
+		}
+	}
+
+	if f.fragment.PacketsFrom != 0 && (f.count < f.fragment.PacketsFrom || f.count > f.fragment.PacketsTo) {
+		return f.writer.Write(b)
+	}
+	for from := 0; ; {
+		to := from + int(randBetween(int64(f.fragment.LengthMin), int64(f.fragment.LengthMax)))
+		if to > len(b) {
+			to = len(b)
+		}
+		n, err := f.writer.Write(b[from:to])
+		from += n
+		time.Sleep(time.Duration(randBetween(int64(f.fragment.IntervalMin), int64(f.fragment.IntervalMax))) * time.Millisecond)
+		if err != nil {
+			return from, err
+		}
+		if from >= len(b) {
+			return from, nil
+		}
+	}
+}
+
 // stolen from github.com/xtls/xray-core/transport/internet/reality
 func randBetween(left int64, right int64) int64 {
 	if left == right {
@@ -347,66 +417,4 @@ func randBetween(left int64, right int64) int64 {
 	}
 	bigInt, _ := rand.Int(rand.Reader, big.NewInt(right-left))
 	return left + bigInt.Int64()
-}
-
-type FragmentedClientHelloConn struct {
-	net.Conn
-	PacketCount int
-	minLength   int
-	maxLength   int
-	minInterval time.Duration
-	maxInterval time.Duration
-}
-
-func (c *FragmentedClientHelloConn) Write(b []byte) (n int, err error) {
-	if len(b) >= 5 && b[0] == 22 && c.PacketCount == 0 {
-		n, err = sendFragmentedClientHello(c, b, c.maxLength)
-
-		if err == nil {
-			c.PacketCount++
-			return n, err
-		}
-	}
-
-	return c.Conn.Write(b)
-}
-
-func sendFragmentedClientHello(conn *FragmentedClientHelloConn, clientHello []byte, maxFragmentSize int) (n int, err error) {
-	if len(clientHello) < 5 || clientHello[0] != 22 {
-		return 0, errors.New("not a valid TLS ClientHello message")
-	}
-
-	clientHelloLen := (int(clientHello[3]) << 8) | int(clientHello[4])
-
-	clientHelloData := clientHello[5:]
-	for i := 0; i < clientHelloLen; i += maxFragmentSize {
-		fragmentEnd := i + maxFragmentSize
-		if fragmentEnd > clientHelloLen {
-			fragmentEnd = clientHelloLen
-		}
-
-		fragment := clientHelloData[i:fragmentEnd]
-
-		err = writeFragmentedRecord(conn, 22, fragment, clientHello)
-		if err != nil {
-			return 0, err
-		}
-	}
-
-	return len(clientHello), nil
-}
-
-func writeFragmentedRecord(c *FragmentedClientHelloConn, contentType uint8, data []byte, clientHello []byte) error {
-	header := make([]byte, 5)
-	header[0] = byte(clientHello[0])
-
-	tlsVersion := (int(clientHello[1]) << 8) | int(clientHello[2])
-	binary.BigEndian.PutUint16(header[1:], uint16(tlsVersion))
-
-	binary.BigEndian.PutUint16(header[3:], uint16(len(data)))
-	_, err := c.Conn.Write(append(header, data...))
-	randomInterval := randBetween(int64(c.minInterval), int64(c.maxInterval))
-	time.Sleep(time.Duration(randomInterval))
-
-	return err
 }
