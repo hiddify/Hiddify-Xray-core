@@ -16,6 +16,7 @@ type RouterRulesConfig struct {
 	RuleList       []json.RawMessage `json:"rules"`
 	DomainStrategy string            `json:"domainStrategy"`
 }
+
 type BalancingOptimalStrategyConfig struct {
 	Timeout  uint32            `json:"timeout,omitempty"`
 	Interval uint32            `json:"interval,omitempty"`

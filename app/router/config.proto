@@ -124,8 +124,6 @@ message RoutingRule {
   string domain_matcher = 17;
 }
 
-
-
 message Weights {
   string tag = 1;
   uint32 weight = 2;
@@ -141,8 +139,6 @@ message BalancingOptimalStrategyConfig {
   bool load_balancing = 7;
   repeated Weights weights = 8;
 }
-
-
 
 message BalancingRule {
   string tag = 1;
