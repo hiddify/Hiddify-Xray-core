@@ -17,16 +17,25 @@ type RouterRulesConfig struct {
 	DomainStrategy string            `json:"domainStrategy"`
 }
 
+type BalancingOptimalStrategyConfig struct {
+	Timeout  uint32            `json:"timeout,omitempty"`
+	Interval uint32            `json:"interval,omitempty"`
+	URL      string            `json:"url",omitempty`
+	Count    uint32            `json:"count,omitempty"`
+	Weights  []*router.Weights `json:"weights,omitempty"`
+}
+
 // StrategyConfig represents a strategy config
 type StrategyConfig struct {
 	Type     string           `json:"type"`
-	Settings *json.RawMessage `json:"settings"`
+	Settings *json.RawMessage `json:"settings,omitempty"`
 }
 
 type BalancingRule struct {
-	Tag       string         `json:"tag"`
-	Selectors StringList     `json:"selector"`
-	Strategy  StrategyConfig `json:"strategy"`
+	Tag                   string                          `json:"tag"`
+	Selectors             StringList                      `json:"selector"`
+	Strategy              StrategyConfig                  `json:"strategy"`
+	OptimalStrategyConfig *BalancingOptimalStrategyConfig `json:"optimalSettings"`
 }
 
 func (r *BalancingRule) Build() (*router.BalancingRule, error) {
@@ -38,19 +47,27 @@ func (r *BalancingRule) Build() (*router.BalancingRule, error) {
 	}
 
 	var strategy string
+	optimalStrategyConfig := new(router.BalancingOptimalStrategyConfig)
 	switch strings.ToLower(r.Strategy.Type) {
 	case strategyRandom, "":
 		strategy = strategyRandom
 	case strategyLeastPing:
 		strategy = "leastPing"
+	case strategyOptimal:
+		strategy = "optimal"
+		err := json.Unmarshal(*r.Strategy.Settings, optimalStrategyConfig)
+		if err != nil {
+			return nil, newError("Not valid optimal strategy settings.").Base(err)
+		}
 	default:
 		return nil, newError("unknown balancing strategy: " + r.Strategy.Type)
 	}
 
 	return &router.BalancingRule{
-		Tag:              r.Tag,
-		OutboundSelector: []string(r.Selectors),
-		Strategy:         strategy,
+		Tag:                   r.Tag,
+		OutboundSelector:      []string(r.Selectors),
+		Strategy:              strategy,
+		OptimalStrategyConfig: optimalStrategyConfig,
 	}, nil
 }
 
