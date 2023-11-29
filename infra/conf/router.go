@@ -21,7 +21,7 @@ type RouterRulesConfig struct {
 type BalancingOptimalStrategyConfig struct {
 	Timeout  uint32            `json:"timeout,omitempty"`
 	Interval uint32            `json:"interval,omitempty"`
-	URL      string            `json:"url",omitempty`
+	URL      string            `json:"url,omitempty"`
 	Count    uint32            `json:"count,omitempty"`
 	Weights  []*router.Weights `json:"weights,omitempty"`
 }
@@ -60,15 +60,20 @@ func (r *BalancingRule) Build() (*router.BalancingRule, error) {
 		if err != nil {
 			return nil, newError("Not valid optimal strategy settings.").Base(err)
 		}
+		return &router.BalancingRule{
+			Tag:                   r.Tag,
+			OutboundSelector:      []string(r.Selectors),
+			Strategy:              strategy,
+			OptimalStrategyConfig: optimalStrategyConfig,
+		}, nil
 	default:
 		return nil, newError("unknown balancing strategy: " + r.Strategy.Type)
 	}
 
 	return &router.BalancingRule{
-		Tag:                   r.Tag,
-		OutboundSelector:      []string(r.Selectors),
-		Strategy:              strategy,
-		OptimalStrategyConfig: optimalStrategyConfig,
+		Tag:              r.Tag,
+		OutboundSelector: []string(r.Selectors),
+		Strategy:         strategy,
 	}, nil
 }
 
