@@ -1,4 +1,4 @@
-name: Test Manually
+name: Test
 
 on:
   push:
@@ -16,6 +16,7 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/workflows/*.yml"
+  workflow_dispatch:
 
 jobs:
   test:
