@@ -24,7 +24,7 @@ jobs:
       contents: read
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
