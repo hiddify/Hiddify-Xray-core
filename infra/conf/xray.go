@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/xtls/xray-core/app/dispatcher"
@@ -188,7 +189,7 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
 	} else {
 		// Listen on specific IP or Unix Domain Socket
 		receiverSettings.Listen = c.ListenOn.Build()
-		listenDS := c.ListenOn.Family().IsDomain() && (c.ListenOn.Domain()[0] == '/' || c.ListenOn.Domain()[0] == '@')
+		listenDS := c.ListenOn.Family().IsDomain() && (filepath.IsAbs(c.ListenOn.Domain()) || c.ListenOn.Domain()[0] == '@')
 		listenIP := c.ListenOn.Family().IsIP() || (c.ListenOn.Family().IsDomain() && c.ListenOn.Domain() == "localhost")
 		if listenIP {
 			// Listen on specific IP, must set PortList
@@ -409,6 +410,7 @@ type Config struct {
 	Reverse         *ReverseConfig         `json:"reverse"`
 	FakeDNS         *FakeDNSConfig         `json:"fakeDns"`
 	Observatory     *ObservatoryConfig     `json:"observatory"`
+	BurstObservatory *BurstObservatoryConfig `json:"burstObservatory"`
 }
 
 func (c *Config) findInboundTag(tag string) int {
@@ -542,6 +544,9 @@ func applyTransportConfig(s *StreamConfig, t *TransportConfig) {
 	if s.DSSettings == nil {
 		s.DSSettings = t.DSConfig
 	}
+	if s.HTTPUPGRADESettings == nil {
+		s.HTTPUPGRADESettings = t.HTTPUPGRADEConfig
+	}
 }
 
 // Build implements Buildable.
@@ -632,6 +637,14 @@ func (c *Config) Build() (*core.Config, error) {
 
 	if c.Observatory != nil {
 		r, err := c.Observatory.Build()
+		if err != nil {
+			return nil, err
+		}
+		config.App = append(config.App, serial.ToTypedMessage(r))
+	}
+
+	if c.BurstObservatory != nil {
+		r, err := c.BurstObservatory.Build()
 		if err != nil {
 			return nil, err
 		}

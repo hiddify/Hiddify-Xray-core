@@ -19,6 +19,7 @@
 *.zip
 *.tar.gz
 xray
+xray_softfloat
 mockgen
 vprotogen
 !infra/vprotogen/
@@ -27,3 +28,4 @@ errorgen
 *.dat
 .vscode
 /configg
+/build_assets
